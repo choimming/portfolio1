@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+from datetime import datetime
 import shutil
 
 import yt_dlp
@@ -18,25 +19,80 @@ import ffmpeg
 OUTPUT_DIR = Path("output")
 TEMP_DIR = Path("temp")
 LINKS_FILE = Path("links.txt")
+PROCESSED_FILE = Path("processed.json")
+LOG_FILE = Path("processing.log")
 
 # Create directories
 OUTPUT_DIR.mkdir(exist_ok=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
+def log_message(message):
+    """로그 메시지 출력 및 저장"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] {message}"
+    print(log_line)
+
+    with open(LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(log_line + '\n')
+
+def load_processed_videos():
+    """처리된 영상 목록 로드"""
+    if PROCESSED_FILE.exists():
+        with open(PROCESSED_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_processed_videos(processed):
+    """처리된 영상 목록 저장"""
+    with open(PROCESSED_FILE, 'w', encoding='utf-8') as f:
+        json.dump(processed, f, ensure_ascii=False, indent=2)
+
 def load_links():
-    """links.txt에서 유튜브 링크 읽기"""
+    """links.txt에서 채널 링크 읽기"""
     if not LINKS_FILE.exists():
-        print(f"Error: {LINKS_FILE} not found")
+        log_message(f"Error: {LINKS_FILE} not found")
         return []
 
     with open(LINKS_FILE, 'r', encoding='utf-8') as f:
-        links = [line.strip() for line in f if line.strip()]
+        links = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
     return links
 
+def get_latest_videos_from_channel(channel_url, max_videos=5):
+    """채널에서 최신 영상 추출"""
+    log_message(f"Fetching latest videos from: {channel_url}")
+
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'playlistend': max_videos,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(channel_url, download=False)
+
+            videos = []
+            if 'entries' in info:
+                for entry in info['entries']:
+                    if entry.get('id'):
+                        video_url = f"https://www.youtube.com/watch?v={entry['id']}"
+                        videos.append({
+                            'url': video_url,
+                            'id': entry['id'],
+                            'title': entry.get('title', 'Unknown')
+                        })
+
+            log_message(f"Found {len(videos)} videos from channel")
+            return videos
+    except Exception as e:
+        log_message(f"Error fetching videos from {channel_url}: {e}")
+        return []
+
 def download_youtube(url, output_path):
     """유튜브 비디오 다운로드"""
-    print(f"Downloading: {url}")
+    log_message(f"Downloading: {url}")
 
     ydl_opts = {
         'format': 'best[ext=mp4]',
@@ -51,12 +107,12 @@ def download_youtube(url, output_path):
             video_file = ydl.prepare_filename(info)
             return video_file
     except Exception as e:
-        print(f"Error downloading {url}: {e}")
+        log_message(f"Error downloading {url}: {e}")
         return None
 
 def extract_audio(video_path, audio_path):
     """비디오에서 오디오 추출"""
-    print(f"Extracting audio from {video_path}")
+    log_message(f"Extracting audio from {video_path}")
 
     try:
         stream = ffmpeg.input(str(video_path))
@@ -64,12 +120,12 @@ def extract_audio(video_path, audio_path):
         ffmpeg.run(stream, capture_stdout=True, capture_stderr=True, quiet=True)
         return True
     except Exception as e:
-        print(f"Error extracting audio: {e}")
+        log_message(f"Error extracting audio: {e}")
         return False
 
 def transcribe_audio(audio_path):
     """Whisper로 일본어 음성 인식"""
-    print(f"Transcribing audio: {audio_path}")
+    log_message(f"Transcribing audio: {audio_path}")
 
     try:
         model = whisper.load_model("base")
@@ -87,7 +143,7 @@ def transcribe_audio(audio_path):
 
         return segments
     except Exception as e:
-        print(f"Error transcribing audio: {e}")
+        log_message(f"Error transcribing audio: {e}")
         return []
 
 def translate_to_korean(text):
@@ -96,19 +152,19 @@ def translate_to_korean(text):
         # DeepL API 키가 환경변수에 설정되어 있어야 함
         api_key = os.environ.get('DEEPL_API_KEY')
         if not api_key:
-            print("Warning: DEEPL_API_KEY not set")
+            log_message("Warning: DEEPL_API_KEY not set")
             return text
 
         translator = deepl.Translator(api_key)
         result = translator.translate_text(text, source_lang="JA", target_lang="KO")
         return result.text
     except Exception as e:
-        print(f"Error translating text: {e}")
+        log_message(f"Error translating text: {e}")
         return text
 
 def crop_to_vertical(video_path, output_path, start_time, duration, width=1080, height=1920):
     """비디오를 9:16 세로 포맷으로 크롭"""
-    print(f"Cropping video to vertical format: {video_path}")
+    log_message(f"Cropping video to vertical format: {video_path}")
 
     try:
         # 원본 비디오 정보 읽기
@@ -131,12 +187,12 @@ def crop_to_vertical(video_path, output_path, start_time, duration, width=1080, 
 
         return True
     except Exception as e:
-        print(f"Error cropping video: {e}")
+        log_message(f"Error cropping video: {e}")
         return False
 
 def add_korean_subtitles(video_path, output_path, korean_text, position='bottom'):
     """한국어 자막을 비디오에 하드코딩"""
-    print(f"Adding Korean subtitles to video")
+    log_message(f"Adding Korean subtitles to video")
 
     try:
         cap = cv2.VideoCapture(str(video_path))
@@ -219,12 +275,12 @@ def add_korean_subtitles(video_path, output_path, korean_text, position='bottom'
         out.release()
         return True
     except Exception as e:
-        print(f"Error adding subtitles: {e}")
+        log_message(f"Error adding subtitles: {e}")
         return False
 
 def select_interesting_segments(segments, count=3):
     """재밌는 구간 선택 (길이가 적당한 구간)"""
-    print(f"Selecting {count} interesting segments")
+    log_message(f"Selecting {count} interesting segments")
 
     # 길이가 5-15초 사이인 구간을 선택
     valid_segments = [
@@ -233,7 +289,7 @@ def select_interesting_segments(segments, count=3):
     ]
 
     if len(valid_segments) < count:
-        print(f"Warning: Only {len(valid_segments)} segments found, need {count}")
+        log_message(f"Warning: Only {len(valid_segments)} segments found, need {count}")
         selected = valid_segments[:count]
     else:
         # 고르게 분산된 구간 선택
@@ -242,11 +298,17 @@ def select_interesting_segments(segments, count=3):
 
     return selected
 
-def process_video(video_url, video_index):
+def process_video(video_url, video_index, processed_videos):
     """단일 비디오 처리"""
-    print(f"\n{'='*60}")
-    print(f"Processing video {video_index}")
-    print(f"{'='*60}")
+    log_message(f"\n{'='*60}")
+    log_message(f"Processing video {video_index}")
+    log_message(f"{'='*60}")
+
+    # 이미 처리한 영상인지 확인
+    video_id = video_url.split('v=')[-1]
+    if video_id in processed_videos:
+        log_message(f"Video already processed: {video_id}")
+        return False
 
     video_dir = TEMP_DIR / f"video_{video_index}"
     video_dir.mkdir(exist_ok=True)
@@ -264,22 +326,27 @@ def process_video(video_url, video_index):
     # 3. 음성 인식
     segments = transcribe_audio(audio_file)
     if not segments:
-        print("No segments transcribed")
+        log_message("No segments transcribed")
         return False
 
     # 4. 번역
     for seg in segments:
         korean_text = translate_to_korean(seg['jp_text'])
         seg['kr_text'] = korean_text
-        print(f"[{seg['start']:.2f}-{seg['end']:.2f}] JP: {seg['jp_text']}")
-        print(f"                KR: {korean_text}")
+        log_message(f"[{seg['start']:.2f}-{seg['end']:.2f}] JP: {seg['jp_text']}")
+        log_message(f"                KR: {korean_text}")
 
     # 5. 재밌는 구간 선택
     selected_segments = select_interesting_segments(segments, count=3)
 
+    if not selected_segments:
+        log_message("No suitable segments found")
+        return False
+
     # 6. 각 구간별 쇼츠 생성
+    success_count = 0
     for idx, seg in enumerate(selected_segments):
-        print(f"\nCreating shorts {idx + 1}/3")
+        log_message(f"\nCreating shorts {idx + 1}/3")
 
         # 6-1. 9:16 세로 크롭
         cropped_video = video_dir / f"cropped_{idx}.mp4"
@@ -288,40 +355,67 @@ def process_video(video_url, video_index):
 
         # 6-2. 한국어 자막 추가
         output_file = OUTPUT_DIR / f"shorts_{video_index}_{idx + 1}.mp4"
-        add_korean_subtitles(cropped_video, output_file, seg['kr_text'])
+        if add_korean_subtitles(cropped_video, output_file, seg['kr_text']):
+            log_message(f"Saved: {output_file}")
+            success_count += 1
 
-        print(f"Saved: {output_file}")
+    # 7. 처리 완료 기록
+    if success_count > 0:
+        processed_videos[video_id] = {
+            'url': video_url,
+            'processed_at': datetime.now().isoformat(),
+            'shorts_created': success_count
+        }
+        save_processed_videos(processed_videos)
+        return True
 
-    return True
+    return False
 
 def main():
     """메인 함수"""
-    print("YouTube to Subtitled Shorts Converter")
-    print(f"Reading links from: {LINKS_FILE}")
-
-    links = load_links()
-    if not links:
-        print("No links found in links.txt")
-        return
-
-    print(f"Found {len(links)} links\n")
+    log_message("="*60)
+    log_message("YouTube to Subtitled Shorts Converter")
+    log_message(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_message("="*60)
 
     # DeepL API 키 확인
     if not os.environ.get('DEEPL_API_KEY'):
-        print("Warning: DEEPL_API_KEY environment variable not set")
-        print("Set it with: export DEEPL_API_KEY='your-api-key'")
+        log_message("Warning: DEEPL_API_KEY environment variable not set")
+        log_message("Set it with: export DEEPL_API_KEY='your-api-key'")
+        return
 
-    # 각 링크 처리
-    for idx, url in enumerate(links, 1):
+    # 채널 링크 로드
+    channel_links = load_links()
+    if not channel_links:
+        log_message("No channel links found in links.txt")
+        return
+
+    log_message(f"Found {len(channel_links)} channels\n")
+
+    # 처리된 영상 로드
+    processed_videos = load_processed_videos()
+    log_message(f"Already processed: {len(processed_videos)} videos\n")
+
+    # 모든 채널에서 최신 영상 수집
+    all_videos = []
+    for channel_url in channel_links:
+        videos = get_latest_videos_from_channel(channel_url, max_videos=5)
+        all_videos.extend(videos)
+
+    log_message(f"\nTotal videos to process: {len(all_videos)}\n")
+
+    # 각 영상 처리
+    for idx, video_info in enumerate(all_videos, 1):
         try:
-            process_video(url, idx)
+            process_video(video_info['url'], idx, processed_videos)
         except Exception as e:
-            print(f"Error processing video {idx}: {e}")
+            log_message(f"Error processing video {idx}: {e}")
             continue
 
-    print(f"\n{'='*60}")
-    print(f"Processing complete! Output saved to: {OUTPUT_DIR}")
-    print(f"{'='*60}")
+    log_message(f"\n{'='*60}")
+    log_message(f"Processing complete! Output saved to: {OUTPUT_DIR}")
+    log_message(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log_message(f"{'='*60}")
 
     # 임시 파일 정리
     shutil.rmtree(TEMP_DIR, ignore_errors=True)
